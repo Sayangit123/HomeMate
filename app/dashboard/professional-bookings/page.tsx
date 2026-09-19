@@ -1,0 +1,849 @@
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
+import Link from "next/link";
+import Swal from "sweetalert2";
+import { useQuery } from "@tanstack/react-query";
+import { Databases, Query as AppwriteQuery } from "appwrite";
+
+import client from "@/lib/appwrite/client";
+import { getCurrentUser, logoutAccount } from "@/lib/appwrite/account";
+import {
+    getProfessionalBookings,
+    updateBookingStatus,
+} from "@/lib/appwrite/booking";
+import {
+    getServiceById,
+} from "@/lib/appwrite/service";
+import { getCurrentMember } from "@/lib/appwrite/database";
+import { getProfileImageUrl } from "@/lib/appwrite/member";
+import { useAuthStore } from "@/lib/stores/auth-store";
+
+const databases = new Databases(client);
+const DATABASE_ID = process.env.NEXT_PUBLIC_APPWRITE_DATABASE_ID!;
+const NOTIFICATIONS_TABLE_ID =
+    process.env.NEXT_PUBLIC_APPWRITE_NOTIFICATIONS_TABLE_ID || "notifications";
+
+interface Booking {
+    $id: string;
+    customerId: string;
+    professionalId: string;
+    serviceId: string;
+    propertyId: string;
+    bookingDate: string;
+    bookingTime: string;
+    status:
+        | "Requested"
+        | "Accepted"
+        | "InProgress"
+        | "Completed"
+        | "Cancelled";
+    notes?: string | null;
+    $createdAt?: string;
+}
+
+interface Service {
+    $id: string;
+    serviceName: string;
+    description?: string;
+    duration: number;
+    price: number;
+}
+
+interface BookingDetails {
+    serviceName: string;
+    description?: string;
+    duration: number;
+    price: number;
+}
+
+export default function ProfessionalBookingsPage() {
+    const router = useRouter();
+    const [mounted, setMounted] = useState(false);
+
+    useEffect(() => {
+        setMounted(true);
+    }, []);
+
+    const [loading, setLoading] = useState(true);
+    const [bookings, setBookings] = useState<Booking[]>([]);
+    const [bookingDetails, setBookingDetails] = useState<Record<string, BookingDetails>>({});
+    const [updatingId, setUpdatingId] = useState<string | null>(null);
+
+    const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+    const [loggingOut, setLoggingOut] = useState(false);
+    const [navbarSearch, setNavbarSearch] = useState("");
+    const [activeFilter, setActiveFilter] = useState<string>("All");
+    const [sortOrder, setSortOrder] = useState<string>("Newest First");
+
+    // Zustand store sync for user profile
+    const storedUser = useAuthStore((state) => state.user);
+    const clearUser = useAuthStore((state) => state.clearUser);
+
+    /* Current User query for navbar */
+    const { data: currentUserData } = useQuery({
+        queryKey: ["user", "bookings-current-user"],
+        queryFn: getCurrentUser,
+    });
+
+    const currentUserId = currentUserData?.$id || storedUser?.userId || "";
+
+    const { data: memberData } = useQuery({
+        queryKey: ["user", "navbar-member-profile", currentUserId],
+        queryFn: async () => {
+            if (!currentUserId) return null;
+            return await getCurrentMember(currentUserId);
+        },
+        enabled: !!currentUserId,
+    });
+
+    const { data: unreadNotificationsCount = 0 } = useQuery({
+        queryKey: ["notifications", "unread-count", currentUserId],
+        queryFn: async () => {
+            if (!currentUserId) return 0;
+            try {
+                const res = await databases.listDocuments(
+                    DATABASE_ID,
+                    NOTIFICATIONS_TABLE_ID,
+                    [AppwriteQuery.equal("userId", currentUserId), AppwriteQuery.equal("isRead", false)]
+                );
+                return res.total ?? res.documents.length;
+            } catch {
+                return 0;
+            }
+        },
+        enabled: !!currentUserId,
+        refetchInterval: 15000,
+    });
+
+    const fullName = memberData?.fullName?.trim() || currentUserData?.name?.trim() || storedUser?.fullName || "Sonu Bhoumik";
+    const userEmail = currentUserData?.email || storedUser?.email || "sonu@gmail.com";
+    const userProfileImage = memberData?.profileImage ? getProfileImageUrl(memberData.profileImage).toString() : storedUser?.profileImage;
+
+    const initials = useMemo(() => {
+        return (
+            fullName
+                .split(/\s+/)
+                .filter(Boolean)
+                .slice(0, 2)
+                .map((p: string) => p.charAt(0).toUpperCase())
+                .join("") || "SB"
+        );
+    }, [fullName]);
+
+    useEffect(() => {
+        loadBookings();
+    }, []);
+
+    const loadBookings = async () => {
+        try {
+            setLoading(true);
+            const user = await getCurrentUser();
+            const response = await getProfessionalBookings(user.$id);
+            const professionalBookings = response.documents as unknown as Booking[];
+            setBookings(professionalBookings);
+
+            const details: Record<string, BookingDetails> = {};
+            await Promise.all(
+                professionalBookings.map(async (booking) => {
+                    try {
+                        const service = (await getServiceById(booking.serviceId)) as unknown as Service;
+                        details[booking.$id] = {
+                            serviceName: service.serviceName,
+                            description: service.description,
+                            duration: service.duration,
+                            price: service.price,
+                        };
+                    } catch (error) {
+                        console.error(`Failed to load service for booking ${booking.$id}:`, error);
+                        details[booking.$id] = {
+                            serviceName: "Service",
+                            description: "",
+                            duration: 0,
+                            price: 0,
+                        };
+                    }
+                })
+            );
+            setBookingDetails(details);
+        } catch (error) {
+            console.error("Failed to load professional bookings:", error);
+            await Swal.fire({
+                icon: "error",
+                title: "Unable to Load",
+                text: "Unable to load incoming bookings.",
+            });
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const formatDate = (dateValue: string) => {
+        try {
+            return new Date(dateValue).toLocaleDateString("en-IN", {
+                day: "2-digit",
+                month: "short",
+                year: "numeric",
+            });
+        } catch {
+            return dateValue;
+        }
+    };
+
+    const getStatusLabel = (status: Booking["status"]) => {
+        if (status === "InProgress") return "In Progress";
+        return status;
+    };
+
+    const getStatusClasses = (status: Booking["status"]) => {
+        switch (status) {
+            case "Requested":
+                return "bg-amber-50 text-amber-700 border-amber-200";
+            case "Accepted":
+                return "bg-blue-50 text-blue-700 border-blue-200";
+            case "InProgress":
+                return "bg-purple-50 text-purple-700 border-purple-200";
+            case "Completed":
+                return "bg-green-50 text-green-700 border-green-200";
+            case "Cancelled":
+                return "bg-red-50 text-red-700 border-red-200";
+            default:
+                return "bg-slate-50 text-slate-700 border-slate-200";
+        }
+    };
+
+    const handleStatusChange = async (bookingId: string, status: Booking["status"]) => {
+        const statusText = getStatusLabel(status);
+        const result = await Swal.fire({
+            icon: "question",
+            title: `Change Status?`,
+            text: `Change this booking status to "${statusText}"?`,
+            showCancelButton: true,
+            confirmButtonText: "Yes, Update",
+            cancelButtonText: "Cancel",
+            confirmButtonColor: "#0f172a",
+        });
+
+        if (!result.isConfirmed) return;
+
+        try {
+            setUpdatingId(bookingId);
+            await updateBookingStatus(bookingId, status);
+            await Swal.fire({
+                icon: "success",
+                title: "Status Updated",
+                text: `Booking is now ${statusText}.`,
+                timer: 1400,
+                showConfirmButton: false,
+            });
+            await loadBookings();
+        } catch (error) {
+            console.error("Failed to update booking status:", error);
+            await Swal.fire({
+                icon: "error",
+                title: "Update Failed",
+                text: "Unable to update the booking status.",
+            });
+        } finally {
+            setUpdatingId(null);
+        }
+    };
+
+    const handleLogout = async () => {
+        const result = await Swal.fire({
+            title: "Logout from HomeMate?",
+            text: "Your current session will be ended.",
+            icon: "warning",
+            showCancelButton: true,
+            confirmButtonText: "Yes, Logout",
+            cancelButtonText: "Cancel",
+            confirmButtonColor: "#ef4444",
+            cancelButtonColor: "#94a3b8",
+            reverseButtons: true,
+        });
+
+        if (!result.isConfirmed) return;
+
+        try {
+            setLoggingOut(true);
+            try {
+                await fetch("/api/auth/logout", { method: "POST" });
+            } catch (err) {
+                console.warn("Server logout skip:", err);
+            }
+            await logoutAccount();
+            clearUser();
+
+            ["token", "accessToken", "authToken", "user", "userData", "role", "userRole"].forEach((key) => {
+                localStorage.removeItem(key);
+                sessionStorage.removeItem(key);
+            });
+
+            window.location.href = "/login";
+        } catch (error) {
+            console.error("Logout error:", error);
+            clearUser();
+            setLoggingOut(false);
+            window.location.href = "/login";
+        }
+    };
+
+    // Filter and Sort bookings
+    const filteredBookings = useMemo(() => {
+        let list = [...bookings];
+        if (activeFilter === "Requested") {
+            list = list.filter((b) => b.status === "Requested");
+        } else if (activeFilter === "Accepted") {
+            list = list.filter((b) => b.status === "Accepted" || b.status === "InProgress" || b.status === "Completed");
+        } else if (activeFilter === "Cancelled") {
+            list = list.filter((b) => b.status === "Cancelled");
+        }
+        return list;
+    }, [bookings, activeFilter]);
+
+    const requestedCount = bookings.filter((b) => b.status === "Requested").length;
+    const acceptedCount = bookings.filter((b) => b.status === "Accepted" || b.status === "InProgress" || b.status === "Completed").length;
+    const cancelledCount = bookings.filter((b) => b.status === "Cancelled").length;
+
+    if (!mounted || loading) {
+        return (
+            <main className="flex min-h-screen items-center justify-center bg-[#f4f7fb]">
+                <div className="text-center">
+                    <div className="mx-auto h-10 w-10 animate-spin rounded-full border-4 border-blue-200 border-t-blue-600" />
+                    <p className="mt-4 text-xs font-bold uppercase tracking-widest text-slate-400">
+                        Loading Incoming Bookings...
+                    </p>
+                </div>
+            </main>
+        );
+    }
+
+    return (
+        <div className="min-h-screen bg-[#f4f7fb] text-slate-800 antialiased">
+            <style jsx global>{`
+                .no-scrollbar::-webkit-scrollbar {
+                    display: none;
+                    width: 0;
+                    height: 0;
+                }
+                .no-scrollbar {
+                    -ms-overflow-style: none;
+                    scrollbar-width: none;
+                }
+            `}</style>
+
+            {/* Mobile Drawer Backdrop */}
+            {mobileMenuOpen && (
+                <div
+                    onClick={() => setMobileMenuOpen(false)}
+                    className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-sm lg:hidden transition-opacity"
+                />
+            )}
+
+            {/* Mobile Sidebar */}
+            <aside
+                className={`fixed inset-y-0 left-0 z-50 flex w-72 flex-col bg-[#0b1a2e] text-white transition-transform duration-300 ease-in-out lg:hidden ${
+                    mobileMenuOpen ? "translate-x-0 shadow-2xl" : "-translate-x-full"
+                }`}
+            >
+                <div className="flex h-20 items-center justify-between border-b border-white/10 px-6">
+                    <div className="flex items-center gap-3">
+                        <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-600 text-white shadow-md">
+                            🏠
+                        </div>
+                        <div>
+                            <span className="text-xl font-black tracking-tight text-white">
+                                Home<span className="text-blue-400">Mate</span>
+                            </span>
+                            <p className="text-[9px] font-bold uppercase tracking-wider text-slate-400">
+                                HOME SERVICES PLATFORM
+                            </p>
+                        </div>
+                    </div>
+                    <button
+                        onClick={() => setMobileMenuOpen(false)}
+                        className="flex h-8 w-8 items-center justify-center rounded-lg border border-white/20 text-slate-300 hover:bg-white/10"
+                    >
+                        ✕
+                    </button>
+                </div>
+
+                <nav className="flex-1 space-y-1.5 overflow-y-auto px-4 py-4 text-xs font-bold">
+                    <Link href="/dashboard" onClick={() => setMobileMenuOpen(false)} className="flex items-center gap-3.5 rounded-xl px-4 py-3 text-slate-400 hover:bg-white/5 hover:text-white transition">
+                        <span>🏠</span><span>Dashboard</span>
+                    </Link>
+                    <Link href="/dashboard/professional-bookings" onClick={() => setMobileMenuOpen(false)} className="flex items-center gap-3.5 rounded-xl bg-blue-600 px-4 py-3 text-white shadow-md">
+                        <span>📅</span><span>Incoming Bookings</span>
+                    </Link>
+                    <Link href="/dashboard/properties" onClick={() => setMobileMenuOpen(false)} className="flex items-center gap-3.5 rounded-xl px-4 py-3 text-slate-400 hover:bg-white/5 hover:text-white transition">
+                        <span>🏘️</span><span>My Properties</span>
+                    </Link>
+                    <Link href="/dashboard/maintenance" onClick={() => setMobileMenuOpen(false)} className="flex items-center gap-3.5 rounded-xl px-4 py-3 text-slate-400 hover:bg-white/5 hover:text-white transition">
+                        <span>🔧</span><span>Maintenance</span>
+                    </Link>
+                    <Link href="/dashboard/marketplace" onClick={() => setMobileMenuOpen(false)} className="flex items-center gap-3.5 rounded-xl px-4 py-3 text-slate-400 hover:bg-white/5 hover:text-white transition">
+                        <span>🛒</span><span>Marketplace</span>
+                    </Link>
+                </nav>
+            </aside>
+
+            {/* Desktop Fixed Navy Sidebar */}
+            <aside className="fixed inset-y-0 left-0 z-40 hidden w-64 flex-col border-r border-slate-900/10 bg-[#0b1a2e] text-white lg:flex">
+                <div className="flex h-20 items-center gap-3 px-6 border-b border-white/10">
+                    <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-600 text-white shadow-md">
+                        🏠
+                    </div>
+                    <div>
+                        <span className="text-xl font-black tracking-tight text-white">
+                            Home<span className="text-blue-400">Mate</span>
+                        </span>
+                        <p className="text-[9px] font-bold uppercase tracking-wider text-slate-400">
+                            HOME SERVICES PLATFORM
+                        </p>
+                    </div>
+                </div>
+
+                <nav className="flex-1 space-y-1 overflow-y-auto px-4 py-5 text-xs font-bold [scrollbar-width:none]">
+                    <Link href="/dashboard" className="flex items-center gap-3.5 rounded-xl px-4 py-2.5 text-slate-300 transition hover:bg-white/5 hover:text-white">
+                        <span>🏠</span><span>Dashboard</span>
+                    </Link>
+                    <Link href="/dashboard/properties" className="flex items-center gap-3.5 rounded-xl px-4 py-2.5 text-slate-300 transition hover:bg-white/5 hover:text-white">
+                        <span>🏘️</span><span>My Properties</span>
+                    </Link>
+                    <Link href="/dashboard/maintenance" className="flex items-center gap-3.5 rounded-xl px-4 py-2.5 text-slate-300 transition hover:bg-white/5 hover:text-white">
+                        <span>🔧</span><span>Maintenance</span>
+                    </Link>
+                    <Link href="/dashboard/bookings/new" className="flex items-center gap-3.5 rounded-xl px-4 py-2.5 text-slate-300 transition hover:bg-white/5 hover:text-white">
+                        <span>🛠️</span><span>Book a Service</span>
+                    </Link>
+                    <Link href="/dashboard/professional-bookings" className="flex items-center gap-3.5 rounded-xl bg-blue-600 px-4 py-3 text-white shadow-md shadow-blue-600/30">
+                        <span>📅</span><span>Incoming Bookings</span>
+                    </Link>
+                    <Link href="/dashboard/marketplace" className="flex items-center gap-3.5 rounded-xl px-4 py-2.5 text-slate-300 transition hover:bg-white/5 hover:text-white">
+                        <span>🛒</span><span>Marketplace</span>
+                    </Link>
+                    <Link href="/dashboard/service-history" className="flex items-center gap-3.5 rounded-xl px-4 py-2.5 text-slate-300 transition hover:bg-white/5 hover:text-white">
+                        <span>⏱️</span><span>Service History</span>
+                    </Link>
+                    <Link href="/dashboard/messages" className="flex items-center gap-3.5 rounded-xl px-4 py-2.5 text-slate-300 transition hover:bg-white/5 hover:text-white">
+                        <span>💬</span><span>Messages</span>
+                    </Link>
+                    <Link href="/dashboard/notifications" className="flex items-center gap-3.5 rounded-xl px-4 py-2.5 text-slate-300 transition hover:bg-white/5 hover:text-white">
+                        <span>🔔</span><span>Notifications</span>
+                    </Link>
+
+                    <div className="pt-4 border-t border-white/10 space-y-1">
+                        <Link href="/dashboard/profile" className="flex items-center gap-3.5 rounded-xl px-4 py-2 text-slate-400 transition hover:bg-white/5 hover:text-white">
+                            <span>👤</span><span>My Profile</span>
+                        </Link>
+                        <Link href="/dashboard/settings" className="flex items-center gap-3.5 rounded-xl px-4 py-2 text-slate-400 transition hover:bg-white/5 hover:text-white">
+                            <span>⚙️</span><span>Settings</span>
+                        </Link>
+                        <button
+                            type="button"
+                            onClick={handleLogout}
+                            className="flex w-full items-center gap-3.5 rounded-xl px-4 py-2 text-rose-400 transition hover:bg-rose-500/10 hover:text-rose-300"
+                        >
+                            <span>🚪</span><span>Logout</span>
+                        </button>
+                    </div>
+                </nav>
+
+                {/* Promo Card */}
+                <div className="p-4">
+                    <div className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-[#122844] to-[#0d1e33] p-4 border border-white/10 shadow-lg">
+                        <div className="flex h-14 w-full items-center justify-center rounded-xl bg-blue-500/10 mb-2.5 text-2xl">
+                            🏡
+                        </div>
+                        <h4 className="text-xs font-black text-white leading-tight">
+                            Better Homes<br />Happier Living
+                        </h4>
+                        <p className="mt-1 text-[10px] text-slate-400">
+                            Trusted professionals for all your home needs.
+                        </p>
+                        <Link
+                            href="/dashboard/bookings/new"
+                            className="mt-3 flex items-center justify-between rounded-lg border border-white/20 bg-white/5 px-3 py-1.5 text-[10px] font-bold text-slate-200 transition hover:bg-white/10 hover:text-white"
+                        >
+                            <span>Book a Service</span>
+                            <span>→</span>
+                        </Link>
+                    </div>
+                </div>
+            </aside>
+
+            {/* Top Navbar */}
+            <header className="sticky top-0 z-30 flex h-20 items-center justify-between border-b border-slate-200/80 bg-white/95 px-4 sm:px-8 backdrop-blur lg:ml-64 gap-4">
+                <div className="flex items-center gap-3 flex-1 max-w-xl">
+                    <button
+                        type="button"
+                        onClick={() => setMobileMenuOpen(true)}
+                        aria-label="Open mobile menu"
+                        className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-slate-200 text-slate-600 transition hover:bg-slate-100 lg:hidden"
+                    >
+                        <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M4 6h16M4 12h16M4 18h16" />
+                        </svg>
+                    </button>
+
+                    <div className="relative w-full">
+                        <span className="absolute inset-y-0 left-0 flex items-center pl-3.5 pointer-events-none text-slate-400 text-sm">
+                            🔍
+                        </span>
+                        <input
+                            type="text"
+                            value={navbarSearch}
+                            onChange={(e) => setNavbarSearch(e.target.value)}
+                            placeholder="Search services, professionals, bookings..."
+                            className="w-full rounded-2xl border border-slate-200 bg-slate-50/70 py-2.5 pl-10 pr-4 text-xs font-medium text-slate-800 placeholder-slate-400 focus:border-blue-500 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-100 transition shadow-sm"
+                        />
+                    </div>
+                </div>
+
+                <div className="flex items-center gap-4">
+                    <div className="relative">
+                        <Link
+                            href="/dashboard/notifications"
+                            className="flex h-10 w-10 items-center justify-center rounded-xl border border-slate-200 text-slate-500 transition hover:bg-slate-50 hover:border-slate-300"
+                        >
+                            🔔
+                        </Link>
+                        {unreadNotificationsCount > 0 && (
+                            <span className="absolute -top-1 -right-1 flex min-h-4 min-w-4 px-1 items-center justify-center rounded-full bg-rose-500 text-[9px] font-black text-white shadow-sm ring-2 ring-white animate-pulse">
+                                {unreadNotificationsCount > 99 ? "99+" : unreadNotificationsCount}
+                            </span>
+                        )}
+                    </div>
+
+                    <div className="flex items-center gap-3 pl-2 border-l border-slate-200">
+                        <div className="relative h-10 w-10 shrink-0 overflow-hidden rounded-full border border-slate-200 bg-blue-50">
+                            {userProfileImage ? (
+                                <img src={userProfileImage} alt={fullName} className="h-full w-full object-cover" />
+                            ) : (
+                                <div className="flex h-full w-full items-center justify-center font-black text-xs text-blue-600 bg-blue-100">
+                                    {initials}
+                                </div>
+                            )}
+                        </div>
+
+                        <div className="hidden text-left sm:block">
+                            <p className="text-xs font-bold text-slate-900 leading-tight">{fullName}</p>
+                            <p className="text-[10px] font-medium text-slate-400">{userEmail}</p>
+                        </div>
+                    </div>
+
+                    <button
+                        type="button"
+                        onClick={handleLogout}
+                        disabled={loggingOut}
+                        className="flex items-center gap-1.5 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-bold text-rose-600 transition hover:bg-rose-600 hover:text-white active:scale-95 shadow-sm disabled:opacity-50"
+                    >
+                        <span>🚪</span>
+                        <span className="hidden sm:inline">{loggingOut ? "Logging out..." : "Logout"}</span>
+                    </button>
+                </div>
+            </header>
+
+            {/* Main Content Area */}
+            <main className="p-4 sm:p-6 lg:ml-64 space-y-6 max-w-7xl mx-auto">
+                {/* Breadcrumb & Back */}
+                <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2 text-xs text-slate-400 font-semibold">
+                        <Link href="/dashboard" className="flex items-center gap-1 hover:text-slate-700">
+                            <span>🏠</span>
+                            <span>Home</span>
+                        </Link>
+                        <span>/</span>
+                        <span>Bookings</span>
+                        <span>/</span>
+                        <span className="text-blue-600">Incoming Bookings</span>
+                    </div>
+
+                    <button
+                        type="button"
+                        onClick={() => router.back()}
+                        className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 transition shadow-sm"
+                    >
+                        <span>←</span>
+                        <span>Back</span>
+                    </button>
+                </div>
+
+                {/* Hero Banner Card */}
+                <div className="relative overflow-hidden rounded-3xl border border-blue-100 bg-gradient-to-r from-blue-50 via-indigo-50/50 to-blue-100/40 p-6 sm:p-8 shadow-sm">
+                    <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6">
+                        <div className="max-w-xl">
+                            <span className="text-[10px] font-bold uppercase tracking-[0.25em] text-blue-600">
+                                SERVICE REQUESTS
+                            </span>
+                            <h1 className="text-2xl sm:text-4xl font-black tracking-tight text-slate-900 mt-1">
+                                Incoming Bookings
+                            </h1>
+                            <p className="mt-2 text-xs sm:text-sm text-slate-600 leading-relaxed">
+                                Manage service requests from your customers with complete oversight and status updates.
+                            </p>
+                        </div>
+
+                        <div className="hidden md:flex items-center gap-6 rounded-2xl bg-white/80 p-4 border border-white shadow-sm backdrop-blur">
+                            <div className="flex items-center gap-2 text-xs font-bold text-slate-700">
+                                <span className="text-emerald-600">⚡</span> Respond Faster
+                            </div>
+                            <div className="flex items-center gap-2 text-xs font-bold text-slate-700">
+                                <span className="text-blue-600">📈</span> Grow Your Business
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                {/* 4 TOP METRIC CARDS */}
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                    <div className="flex items-center gap-4 rounded-2xl border border-slate-200/80 bg-white p-5 shadow-sm">
+                        <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-blue-50 text-blue-600 text-xl font-bold">
+                            📋
+                        </div>
+                        <div>
+                            <p className="text-xs font-bold text-slate-400">Total Requests</p>
+                            <p className="text-2xl font-black text-slate-900 mt-0.5">{bookings.length}</p>
+                            <p className="text-[10px] text-slate-400">New service bookings</p>
+                        </div>
+                    </div>
+
+                    <div className="flex items-center gap-4 rounded-2xl border border-slate-200/80 bg-amber-50/40 p-5 shadow-sm border-amber-100">
+                        <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-amber-50 text-amber-600 text-xl font-bold">
+                            ⏳
+                        </div>
+                        <div>
+                            <p className="text-xs font-bold text-amber-600">Pending</p>
+                            <p className="text-2xl font-black text-slate-900 mt-0.5">{requestedCount}</p>
+                            <p className="text-[10px] text-amber-500 font-medium">Awaiting your action</p>
+                        </div>
+                    </div>
+
+                    <div className="flex items-center gap-4 rounded-2xl border border-slate-200/80 bg-emerald-50/40 p-5 shadow-sm border-emerald-100">
+                        <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-emerald-50 text-emerald-600 text-xl font-bold">
+                            ✓
+                        </div>
+                        <div>
+                            <p className="text-xs font-bold text-emerald-600">Accepted</p>
+                            <p className="text-2xl font-black text-slate-900 mt-0.5">{acceptedCount}</p>
+                            <p className="text-[10px] text-emerald-500 font-medium">Confirmed bookings</p>
+                        </div>
+                    </div>
+
+                    <div className="flex items-center gap-4 rounded-2xl border border-slate-200/80 bg-rose-50/40 p-5 shadow-sm border-rose-100">
+                        <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-rose-50 text-rose-600 text-xl font-bold">
+                            ✕
+                        </div>
+                        <div>
+                            <p className="text-xs font-bold text-rose-600">Cancelled</p>
+                            <p className="text-2xl font-black text-slate-900 mt-0.5">{cancelledCount}</p>
+                            <p className="text-[10px] text-rose-400 font-medium">Declined requests</p>
+                        </div>
+                    </div>
+                </div>
+
+                {/* FILTER PILLS & REFRESH ROW */}
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                    <div className="flex flex-wrap items-center gap-2">
+                        {[
+                            { id: "All", label: `All (${bookings.length})` },
+                            { id: "Requested", label: `Requested (${requestedCount})` },
+                            { id: "Accepted", label: `Accepted (${acceptedCount})` },
+                            { id: "Cancelled", label: `Cancelled (${cancelledCount})` },
+                        ].map((tab) => (
+                            <button
+                                key={tab.id}
+                                type="button"
+                                onClick={() => setActiveFilter(tab.id)}
+                                className={`rounded-xl px-4 py-2.5 text-xs font-bold transition shadow-sm ${
+                                    activeFilter === tab.id
+                                        ? "bg-blue-600 text-white shadow-md shadow-blue-500/20"
+                                        : "bg-white text-slate-600 border border-slate-200 hover:bg-slate-50"
+                                }`}
+                            >
+                                {tab.label}
+                            </button>
+                        ))}
+                    </div>
+
+                    <div className="flex items-center gap-3">
+                        <div className="flex items-center gap-2 text-xs font-bold text-slate-500">
+                            <span>Sort by:</span>
+                            <select
+                                value={sortOrder}
+                                onChange={(e) => setSortOrder(e.target.value)}
+                                className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-700 outline-none focus:border-blue-500 shadow-sm"
+                            >
+                                <option value="Newest First">Newest First</option>
+                                <option value="Oldest First">Oldest First</option>
+                            </select>
+                        </div>
+
+                        <button
+                            type="button"
+                            onClick={() => loadBookings()}
+                            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 transition shadow-sm"
+                        >
+                            <span>↻</span>
+                            <span>Refresh</span>
+                        </button>
+                    </div>
+                </div>
+
+                {/* BOOKINGS LIST */}
+                {filteredBookings.length === 0 ? (
+                    <div className="rounded-3xl border border-slate-200/80 bg-white p-16 text-center shadow-sm">
+                        <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-blue-50 text-3xl">
+                            📋
+                        </div>
+                        <h2 className="text-lg font-black text-slate-900">
+                            No Bookings Found
+                        </h2>
+                        <p className="mx-auto mt-1 max-w-sm text-xs text-slate-500 leading-relaxed">
+                            No service bookings match the "{activeFilter}" filter category.
+                        </p>
+                    </div>
+                ) : (
+                    <div className="space-y-4">
+                        {filteredBookings.map((booking) => {
+                            const details = bookingDetails[booking.$id];
+
+                            return (
+                                <article
+                                    key={booking.$id}
+                                    className="rounded-3xl border border-slate-200/80 bg-white p-6 shadow-sm transition hover:border-blue-300"
+                                >
+                                    {/* Top Row: Service Name & Status */}
+                                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-100 pb-4">
+                                        <div>
+                                            <h2 className="text-base font-black text-slate-900 tracking-tight">
+                                                {details?.serviceName || "Loading service..."}
+                                            </h2>
+                                            <p className="text-[11px] text-slate-400 font-mono mt-0.5">
+                                                Booking ID: {booking.$id}
+                                            </p>
+                                        </div>
+
+                                        <span className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-bold border ${getStatusClasses(booking.status)}`}>
+                                            {getStatusLabel(booking.status)}
+                                        </span>
+                                    </div>
+
+                                    {/* Middle Grid: IDs, Date, Time, Duration & Price */}
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 py-4 text-xs">
+                                        <div className="rounded-2xl border border-slate-100 bg-slate-50/60 p-3">
+                                            <p className="text-[10px] font-bold uppercase text-slate-400">Customer ID</p>
+                                            <p className="font-semibold text-slate-800 mt-0.5 break-all font-mono">{booking.customerId}</p>
+                                        </div>
+
+                                        <div className="rounded-2xl border border-slate-100 bg-slate-50/60 p-3">
+                                            <p className="text-[10px] font-bold uppercase text-slate-400">Property ID</p>
+                                            <p className="font-semibold text-slate-800 mt-0.5 break-all font-mono">{booking.propertyId}</p>
+                                        </div>
+
+                                        <div className="rounded-2xl border border-slate-100 bg-slate-50/60 p-3">
+                                            <p className="text-[10px] font-bold uppercase text-slate-400">Schedule</p>
+                                            <p className="font-bold text-slate-800 mt-0.5">
+                                                📅 {formatDate(booking.bookingDate)} at {booking.bookingTime}
+                                            </p>
+                                        </div>
+
+                                        <div className="rounded-2xl border border-slate-100 bg-slate-50/60 p-3">
+                                            <p className="text-[10px] font-bold uppercase text-slate-400">Service Price</p>
+                                            <p className="font-black text-slate-900 mt-0.5">
+                                                ₹{details?.price || 0} ({details?.duration || 0} mins)
+                                            </p>
+                                        </div>
+                                    </div>
+
+                                    {/* Customer Notes */}
+                                    {booking.notes && (
+                                        <div className="rounded-2xl border border-amber-200/60 bg-amber-50/40 p-3.5 my-2 text-xs">
+                                            <p className="font-bold uppercase tracking-wider text-amber-800 text-[10px]">Customer Notes</p>
+                                            <p className="text-slate-700 mt-1">{booking.notes}</p>
+                                        </div>
+                                    )}
+
+                                    {/* Bottom Action Buttons */}
+                                    <div className="flex flex-col sm:flex-row items-center justify-between gap-4 border-t border-slate-100 pt-4 mt-2">
+                                        <div className="text-xs text-slate-400 font-medium">
+                                            {booking.$createdAt ? `Received on ${new Date(booking.$createdAt).toLocaleString("en-IN")}` : "Active Booking Request"}
+                                        </div>
+
+                                        <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
+                                            {booking.status === "Requested" && (
+                                                <>
+                                                    <button
+                                                        type="button"
+                                                        disabled={updatingId === booking.$id}
+                                                        onClick={() => handleStatusChange(booking.$id, "Accepted")}
+                                                        className="flex-1 sm:flex-none rounded-xl bg-emerald-600 px-5 py-2.5 text-xs font-bold text-white shadow-sm hover:bg-emerald-700 transition disabled:opacity-50"
+                                                    >
+                                                        ✓ Accept Booking
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        disabled={updatingId === booking.$id}
+                                                        onClick={() => handleStatusChange(booking.$id, "Cancelled")}
+                                                        className="flex-1 sm:flex-none rounded-xl border border-rose-200 bg-rose-50 px-5 py-2.5 text-xs font-bold text-rose-600 hover:bg-rose-600 hover:text-white transition disabled:opacity-50"
+                                                    >
+                                                        ✕ Cancel
+                                                    </button>
+                                                </>
+                                            )}
+
+                                            {booking.status === "Accepted" && (
+                                                <>
+                                                    <button
+                                                        type="button"
+                                                        disabled={updatingId === booking.$id}
+                                                        onClick={() => handleStatusChange(booking.$id, "InProgress")}
+                                                        className="flex-1 sm:flex-none rounded-xl bg-purple-600 px-5 py-2.5 text-xs font-bold text-white shadow-sm hover:bg-purple-700 transition disabled:opacity-50"
+                                                    >
+                                                        ▶ Start Service
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        disabled={updatingId === booking.$id}
+                                                        onClick={() => handleStatusChange(booking.$id, "Cancelled")}
+                                                        className="flex-1 sm:flex-none rounded-xl border border-rose-200 bg-rose-50 px-5 py-2.5 text-xs font-bold text-rose-600 hover:bg-rose-600 hover:text-white transition disabled:opacity-50"
+                                                    >
+                                                        ✕ Cancel
+                                                    </button>
+                                                </>
+                                            )}
+
+                                            {booking.status === "InProgress" && (
+                                                <button
+                                                    type="button"
+                                                    disabled={updatingId === booking.$id}
+                                                    onClick={() => handleStatusChange(booking.$id, "Completed")}
+                                                    className="flex-1 sm:flex-none rounded-xl bg-emerald-600 px-5 py-2.5 text-xs font-bold text-white shadow-sm hover:bg-emerald-700 transition disabled:opacity-50"
+                                                >
+                                                    ✓ Mark Completed
+                                                </button>
+                                            )}
+
+                                            {booking.status === "Completed" && (
+                                                <span className="text-xs font-bold text-emerald-600 flex items-center gap-1.5 bg-emerald-50 px-3 py-1.5 rounded-xl border border-emerald-200">
+                                                    ✓ Service accepted & completed successfully
+                                                </span>
+                                            )}
+
+                                            {booking.status === "Cancelled" && (
+                                                <span className="text-xs font-bold text-rose-600 flex items-center gap-1.5 bg-rose-50 px-3 py-1.5 rounded-xl border border-rose-200">
+                                                    ✕ This booking has been cancelled
+                                                </span>
+                                            )}
+                                        </div>
+                                    </div>
+                                </article>
+                            );
+                        })}
+                    </div>
+                )}
+            </main>
+        </div>
+    );
+}
