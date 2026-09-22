@@ -13,7 +13,10 @@ import {
 } from "@/lib/stores/service-history-store";
 import { useAuthStore } from "@/lib/stores/auth-store";
 import { getCurrentUser, logoutAccount } from "@/lib/appwrite/account";
-import { getCustomerBookings } from "@/lib/appwrite/booking";
+import {
+  getCustomerBookings,
+  getProfessionalBookings,
+} from "@/lib/appwrite/booking";
 import { getUserProperties } from "@/lib/appwrite/property";
 import { getServiceById } from "@/lib/appwrite/service";
 import { getUserMaintenance, MaintenanceStatus } from "@/lib/appwrite/maintenance";
@@ -195,66 +198,122 @@ export default function ServiceHistoryPage() {
      TANSTACK QUERY: SERVICE HISTORY DATA
   ========================================================== */
   const serviceHistoryQuery = useQuery({
-    queryKey: ["service-history"],
+    queryKey: ["service-history", activeUserId],
     queryFn: async () => {
       const user = await getCurrentUser();
 
-      const [
-        bookingResponse,
-        propertyResponse,
-        maintenanceResponse,
-        warrantyResponse,
-        professionalResponse,
-      ] = await Promise.all([
-        getCustomerBookings(user.$id),
-        getUserProperties(user.$id),
-        getUserMaintenance(user.$id),
-        getCustomerWarranties(user.$id),
-        getAllMembers(),
-      ]);
+      if (!user) {
+        throw new Error("User not authenticated");
+      }
 
-      const customerBookings = bookingResponse.documents as unknown as Booking[];
-      const customerProperties = propertyResponse.documents as unknown as Property[];
-      const maintenanceRecords = maintenanceResponse.documents as unknown as MaintenanceRecord[];
-      const customerWarranties = warrantyResponse.documents as unknown as Warranty[];
-      const professionalMembers = (
-        professionalResponse.documents as unknown as ProfessionalMember[]
-      ).filter((member) => member.role === "professional");
+      /*
+       * Resolve the role directly from the Appwrite member record.
+       * This makes the page reliable even when the navbar query/store
+       * has not finished loading yet.
+       */
+      const currentMember = await getCurrentMember(user.$id);
+      const isProfessional =
+        currentMember?.role === "professional" || userData?.role === "professional";
+
+      /*
+       * CUSTOMER:
+       *   getCustomerBookings(user.$id)
+       *
+       * PROFESSIONAL:
+       *   getProfessionalBookings(user.$id)
+       *
+       * Both roles therefore see the same booking records from their
+       * own side of the service relationship.
+       */
+      const bookingResponse = isProfessional
+        ? await getProfessionalBookings(user.$id)
+        : await getCustomerBookings(user.$id);
+
+      const bookings = bookingResponse.documents as unknown as Booking[];
+
+      let customerProperties: Property[] = [];
+      let maintenanceRecords: MaintenanceRecord[] = [];
+      let customerWarranties: Warranty[] = [];
+
+      /* These supporting datasets are relevant to the customer view. */
+      if (!isProfessional) {
+        const [propertyResponse, maintenanceResponse, warrantyResponse] =
+          await Promise.all([
+            getUserProperties(user.$id),
+            getUserMaintenance(user.$id),
+            getCustomerWarranties(user.$id),
+          ]);
+
+        customerProperties =
+          propertyResponse.documents as unknown as Property[];
+        maintenanceRecords =
+          maintenanceResponse.documents as unknown as MaintenanceRecord[];
+        customerWarranties =
+          warrantyResponse.documents as unknown as Warranty[];
+      }
+
+      /*
+       * We need member information for both sides of the booking:
+       * - Customer view: show the assigned professional
+       * - Professional view: show the customer who booked the service
+       */
+      const membersResponse = await getAllMembers();
+      const allMembers =
+        membersResponse.documents as unknown as ProfessionalMember[];
+
+      const professionalMembers = allMembers.filter(
+        (member) => member.role === "professional"
+      );
 
       const details: Record<string, BookingDetails> = {};
 
       await Promise.all(
-        customerBookings.map(async (booking) => {
+        bookings.map(async (booking) => {
           try {
-            const service = (await getServiceById(booking.serviceId)) as unknown as Service;
-            const property = customerProperties.find((item) => item.$id === booking.propertyId);
+            const service = (await getServiceById(
+              booking.serviceId
+            )) as unknown as Service;
+
+            const property = customerProperties.find(
+              (item) => item.$id === booking.propertyId
+            );
 
             details[booking.$id] = {
               serviceName: service.serviceName,
               price: Number(service.price || 0),
               duration: Number(service.duration || 0),
-              propertyName: property?.propertyName || "My Home",
+              propertyName:
+                property?.propertyName ||
+                (isProfessional ? "Service Property" : "My Home"),
             };
           } catch (error) {
+            console.error(
+              `Failed to load service for booking ${booking.$id}:`,
+              error
+            );
+
             details[booking.$id] = {
               serviceName: "Home Service",
-              price: 1000,
-              duration: 60,
-              propertyName: "My Home",
+              price: 0,
+              duration: 0,
+              propertyName: isProfessional ? "Service Property" : "My Home",
             };
           }
         })
       );
 
       return {
-        bookings: customerBookings,
+        bookings,
         properties: customerProperties,
         maintenance: maintenanceRecords,
         warranties: customerWarranties,
         professionals: professionalMembers,
+        allMembers,
         bookingDetails: details,
+        isProfessional,
       };
     },
+    enabled: !!activeUserId,
     retry: 1,
     staleTime: 30 * 1000,
   });
@@ -265,6 +324,9 @@ export default function ServiceHistoryPage() {
   const professionals = serviceHistoryQuery.data?.professionals || [];
   const properties = serviceHistoryQuery.data?.properties || [];
   const bookingDetails = serviceHistoryQuery.data?.bookingDetails || {};
+  const allMembers = serviceHistoryQuery.data?.allMembers || [];
+  const isProfessional =
+    serviceHistoryQuery.data?.isProfessional || false;
   const loading = serviceHistoryQuery.isLoading;
 
   useEffect(() => {
@@ -365,7 +427,15 @@ export default function ServiceHistoryPage() {
   };
 
   const getProfessionalDetails = (professionalId: string) => {
-    return professionals.find((professional) => professional.userId === professionalId);
+    return professionals.find(
+      (professional) => professional.userId === professionalId
+    );
+  };
+
+  const getCustomerDetails = (customerId: string) => {
+    return allMembers.find(
+      (member) => member.userId === customerId && member.role === "customer"
+    );
   };
 
   const completedBookings = useMemo(() => {
@@ -414,10 +484,12 @@ export default function ServiceHistoryPage() {
       list = list.filter((b) => {
         const det = bookingDetails[b.$id];
         const prof = getProfessionalDetails(b.professionalId);
+        const customer = getCustomerDetails(b.customerId);
         return (
           det?.serviceName?.toLowerCase().includes(q) ||
           det?.propertyName?.toLowerCase().includes(q) ||
           prof?.fullName?.toLowerCase().includes(q) ||
+          customer?.fullName?.toLowerCase().includes(q) ||
           b.$id.toLowerCase().includes(q)
         );
       });
@@ -428,7 +500,15 @@ export default function ServiceHistoryPage() {
       const timeB = new Date(`${b.bookingDate}T${b.bookingTime || "00:00"}`).getTime();
       return sortBy === "newest" ? timeB - timeA : timeA - timeB;
     });
-  }, [bookings, selectedFilter, navbarSearch, sortBy, bookingDetails]);
+  }, [
+    bookings,
+    selectedFilter,
+    navbarSearch,
+    sortBy,
+    bookingDetails,
+    professionals,
+    allMembers,
+  ]);
 
   /* Status badge pill renderer */
   const renderStatusPill = (status: Booking["status"]) => {
@@ -868,7 +948,9 @@ export default function ServiceHistoryPage() {
             Service History
           </h1>
           <p className="mt-1 text-xs sm:text-sm text-slate-500">
-            View your previous services, completed work, upcoming maintenance and property service history from one place.
+            {isProfessional
+              ? "View the services you have provided, completed work, upcoming appointments and customer service history from one place."
+              : "View your previous services, completed work, upcoming maintenance and property service history from one place."}
           </p>
         </div>
 
@@ -1086,18 +1168,22 @@ export default function ServiceHistoryPage() {
                       </div>
                     </div>
 
-                    {/* Professional */}
+                    {/* Customer / Professional */}
                     <div className="flex items-center gap-2.5">
                       <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-indigo-50 text-indigo-600 text-sm">
                         👤
                       </span>
                       <div className="min-w-0">
-                        <p className="text-[10px] font-bold uppercase text-slate-400">Professional</p>
+                        <p className="text-[10px] font-bold uppercase text-slate-400">
+                          {isProfessional ? "Customer" : "Professional"}
+                        </p>
                         <div className="flex items-center gap-1.5 mt-0.5">
                           <p className="text-xs font-black text-slate-900 truncate">
-                            {professional?.fullName || "Assigned Professional"}
+                            {isProfessional
+                              ? getCustomerDetails(booking.customerId)?.fullName || "Customer"
+                              : professional?.fullName || "Assigned Professional"}
                           </p>
-                          {professional?.phone && (
+                          {!isProfessional && professional?.phone && (
                             <a
                               href={`tel:${professional.phone}`}
                               className="text-xs text-blue-600 hover:text-blue-800"

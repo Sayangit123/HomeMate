@@ -108,6 +108,77 @@ export const getProfessionalBookings = async (
 };
 
 /**
+ * Get bookings for one professional on one date.
+ *
+ * Cancelled bookings are returned as well so that
+ * the caller can explicitly ignore them.
+ */
+export const getProfessionalBookingsForDate = async (
+    professionalId: string,
+    bookingDate: string
+) => {
+    return await databases.listDocuments(
+        DATABASE_ID,
+        BOOKINGS_TABLE_ID,
+        [
+            Query.equal(
+                "professionalId",
+                professionalId
+            ),
+            Query.equal(
+                "bookingDate",
+                bookingDate
+            ),
+            Query.orderAsc(
+                "bookingTime"
+            ),
+        ]
+    );
+};
+
+/**
+ * Check whether a particular professional/date/time
+ * is already booked.
+ *
+ * Cancelled bookings do NOT block the slot.
+ */
+export const getBookedSlot = async (
+    professionalId: string,
+    bookingDate: string,
+    bookingTime: string
+) => {
+    const response =
+        await databases.listDocuments(
+            DATABASE_ID,
+            BOOKINGS_TABLE_ID,
+            [
+                Query.equal(
+                    "professionalId",
+                    professionalId
+                ),
+                Query.equal(
+                    "bookingDate",
+                    bookingDate
+                ),
+                Query.equal(
+                    "bookingTime",
+                    bookingTime
+                ),
+                Query.limit(100),
+            ]
+        );
+
+    const activeBooking =
+        response.documents.find(
+            (booking) =>
+                booking.status !==
+                "Cancelled"
+        );
+
+    return activeBooking || null;
+};
+
+/**
  * Get one booking by its document ID
  */
 export const getBookingById = async (
@@ -127,25 +198,41 @@ export const updateBooking = async (
     bookingId: string,
     data: UpdateBookingData
 ) => {
-    const updateData: Record<string, unknown> = {};
+    const updateData: Record<
+        string,
+        unknown
+    > = {};
 
-    if (data.bookingDate !== undefined) {
+    if (
+        data.bookingDate !==
+        undefined
+    ) {
         updateData.bookingDate =
             data.bookingDate;
     }
 
-    if (data.bookingTime !== undefined) {
+    if (
+        data.bookingTime !==
+        undefined
+    ) {
         updateData.bookingTime =
             data.bookingTime;
     }
 
-    if (data.notes !== undefined) {
+    if (
+        data.notes !==
+        undefined
+    ) {
         updateData.notes =
             data.notes ?? null;
     }
 
-    if (data.status !== undefined) {
-        updateData.status = data.status;
+    if (
+        data.status !==
+        undefined
+    ) {
+        updateData.status =
+            data.status;
     }
 
     return await databases.updateDocument(

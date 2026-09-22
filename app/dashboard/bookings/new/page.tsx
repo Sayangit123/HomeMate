@@ -1,17 +1,20 @@
 "use client";
 
-import { useMemo } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { useQuery, useMutation } from "@tanstack/react-query";
 import Swal from "sweetalert2";
 import type { Models } from "appwrite";
 
 import { getCurrentUser } from "@/lib/appwrite/account";
-import { createBooking } from "@/lib/appwrite/booking";
+
+import {
+    createBooking,
+    getProfessionalBookingsForDate,
+    getBookedSlot,
+} from "@/lib/appwrite/booking";
+
 import { getUserProperties } from "@/lib/appwrite/property";
 import { getAllServices } from "@/lib/appwrite/service";
-
-import { useBookingStore } from "@/lib/stores/booking-store";
 
 interface Property extends Models.Document {
     propertyName?: string;
@@ -29,109 +32,103 @@ interface Service extends Models.Document {
     availableSlots: string;
 }
 
+interface Booking extends Models.Document {
+    professionalId?: string;
+    bookingDate?: string;
+    bookingTime?: string;
+    status?: string;
+}
+
 export default function NewBookingPage() {
     const router = useRouter();
 
-    /*
-     * Zustand
-     * ----------
-     * Booking form state is kept in Zustand so that the
-     * selected booking information is available outside
-     * this component when required.
+    const [loading, setLoading] =
+        useState(true);
+
+    const [submitting, setSubmitting] =
+        useState(false);
+
+    const [loadingSlots, setLoadingSlots] =
+        useState(false);
+
+    const [properties, setProperties] =
+        useState<Property[]>([]);
+
+    const [services, setServices] =
+        useState<Service[]>([]);
+
+    const [selectedService, setSelectedService] =
+        useState("");
+
+    const [selectedProperty, setSelectedProperty] =
+        useState("");
+
+    const [bookingDate, setBookingDate] =
+        useState("");
+
+    const [bookingTime, setBookingTime] =
+        useState("");
+
+    const [notes, setNotes] =
+        useState("");
+
+    /**
+     * Stores the time slots which are already booked
+     * for the selected professional/date.
      */
-    const {
-        selectedService,
-        selectedProperty,
-        bookingDate,
-        bookingTime,
-        notes,
+    const [bookedTimes, setBookedTimes] =
+        useState<string[]>([]);
 
-        setSelectedService,
-        setSelectedProperty,
-        setBookingDate,
-        setBookingTime,
-        setNotes,
+    useEffect(() => {
+        loadBookingData();
+    }, []);
 
-        resetBooking,
-    } = useBookingStore();
+    const loadBookingData = async () => {
+        try {
+            setLoading(true);
 
-    /*
-     * TanStack Query
-     * ----------
-     * Load the currently logged-in user's properties.
-     */
-    const {
-        data: properties = [],
-        isLoading: propertiesLoading,
-    } = useQuery({
-        queryKey: ["booking-properties"],
-        queryFn: async (): Promise<Property[]> => {
-            const user = await getCurrentUser();
+            const user =
+                await getCurrentUser();
 
-            const response =
-                await getUserProperties(user.$id);
+            const propertyResponse =
+                await getUserProperties(
+                    user.$id
+                );
 
-            return response.documents as Property[];
-        },
-    });
+            const serviceResponse =
+                await getAllServices();
 
-    /*
-     * TanStack Query
-     * ----------
-     * Load all available professional services.
-     */
-    const {
-        data: services = [],
-        isLoading: servicesLoading,
-    } = useQuery({
-        queryKey: ["booking-services"],
-        queryFn: async (): Promise<Service[]> => {
-            const response = await getAllServices();
+            setProperties(
+                propertyResponse.documents as Property[]
+            );
 
-            return response.documents as unknown as Service[];
-        },
-    });
+            setServices(
+                serviceResponse.documents as unknown as Service[]
+            );
+        } catch (error) {
+            console.error(
+                "Failed to load booking data:",
+                error
+            );
 
-    /*
-     * Overall loading state
-     */
-    const loading =
-        propertiesLoading || servicesLoading;
+            await Swal.fire({
+                icon: "error",
+                title: "Unable to Load",
+                text: "Unable to load booking information.",
+            });
+        } finally {
+            setLoading(false);
+        }
+    };
 
-    /*
-     * Find the currently selected service.
-     */
-    const selectedServiceData = useMemo(
-        () =>
-            services.find(
-                (service) =>
-                    service.$id === selectedService
-            ),
-        [services, selectedService]
-    );
-
-    /*
-     * Find the currently selected property.
-     */
-    const selectedPropertyData = useMemo(
-        () =>
-            properties.find(
-                (property) =>
-                    property.$id === selectedProperty
-            ),
-        [properties, selectedProperty]
-    );
-
-    /*
-     * Parse service available days.
-     */
     const getAvailableDays = (
         service: Service
     ): string[] => {
         try {
-            const days = JSON.parse(
-                service.availableDays
-            );
+            const days =
+                JSON.parse(
+                    service.availableDays
+                );
 
             return Array.isArray(days)
                 ? days
@@ -141,16 +138,14 @@ export default function NewBookingPage() {
         }
     };
 
-    /*
-     * Parse service available slots.
-     */
     const getAvailableSlots = (
         service: Service
     ): string[] => {
         try {
-            const slots = JSON.parse(
-                service.availableSlots
-            );
+            const slots =
+                JSON.parse(
+                    service.availableSlots
+                );
 
             return Array.isArray(slots)
                 ? slots
@@ -160,23 +155,166 @@ export default function NewBookingPage() {
         }
     };
 
-    /*
-     * When service changes:
-     * - update Zustand
-     * - clear previously selected date/time
+    const selectedServiceData =
+        services.find(
+            (service) =>
+                service.$id ===
+                selectedService
+        );
+
+    const selectedPropertyData =
+        properties.find(
+            (property) =>
+                property.$id ===
+                selectedProperty
+        );
+
+    /**
+     * Load already booked slots whenever
+     * professional + date changes.
      */
+    const loadBookedSlots = async (
+        dateValue: string,
+        service?: Service
+    ) => {
+        if (
+            !dateValue ||
+            !service?.userId
+        ) {
+            setBookedTimes([]);
+            return;
+        }
+
+        try {
+            setLoadingSlots(true);
+
+            /*
+             * Your createBooking function stores
+             * the date as:
+             *
+             * YYYY-MM-DDT00:00:00.000Z
+             */
+            const appwriteBookingDate =
+                `${dateValue}T00:00:00.000Z`;
+
+            const response =
+                await getProfessionalBookingsForDate(
+                    service.userId,
+                    appwriteBookingDate
+                );
+
+            const activeBookedTimes =
+                response.documents
+                    .filter(
+                        (
+                            booking: Booking
+                        ) =>
+                            booking.status !==
+                            "Cancelled"
+                    )
+                    .map(
+                        (
+                            booking: Booking
+                        ) =>
+                            booking.bookingTime
+                    )
+                    .filter(
+                        (
+                            time
+                        ): time is string =>
+                            Boolean(time)
+                    );
+
+            setBookedTimes(
+                activeBookedTimes
+            );
+        } catch (error) {
+            console.error(
+                "Failed to load booked slots:",
+                error
+            );
+
+            setBookedTimes([]);
+
+            await Swal.fire({
+                icon: "error",
+                title: "Unable to Check Availability",
+                text: "We could not check the availability of this date. Please try again.",
+            });
+        } finally {
+            setLoadingSlots(false);
+        }
+    };
+
     const handleServiceChange = (
         value: string
     ) => {
         setSelectedService(value);
+
         setBookingTime("");
         setBookingDate("");
+
+        setBookedTimes([]);
     };
 
-    /*
-     * Check whether the selected date is available
-     * according to the selected service.
-     */
+    const handleDateChange = async (
+        value: string
+    ) => {
+        setBookingDate(value);
+
+        /*
+         * Always reset selected time when
+         * date changes.
+         */
+        setBookingTime("");
+
+        setBookedTimes([]);
+
+        if (
+            !value ||
+            !selectedServiceData
+        ) {
+            return;
+        }
+
+        const date = new Date(
+            `${value}T00:00:00`
+        );
+
+        const dayNames = [
+            "Sunday",
+            "Monday",
+            "Tuesday",
+            "Wednesday",
+            "Thursday",
+            "Friday",
+            "Saturday",
+        ];
+
+        const selectedDay =
+            dayNames[
+                date.getDay()
+            ];
+
+        const availableDays =
+            getAvailableDays(
+                selectedServiceData
+            );
+
+        if (
+            !availableDays.includes(
+                selectedDay
+            )
+        ) {
+            return;
+        }
+
+        await loadBookedSlots(
+            value,
+            selectedServiceData
+        );
+    };
+
     const isDateAvailable = (
         dateValue: string
     ) => {
@@ -202,160 +340,23 @@ export default function NewBookingPage() {
         ];
 
         const selectedDay =
-            dayNames[date.getDay()];
+            dayNames[
+                date.getDay()
+            ];
 
         return getAvailableDays(
             selectedServiceData
         ).includes(selectedDay);
     };
 
-    /*
-     * TanStack Query mutation
-     * ----------
-     * Handles booking creation.
-     */
-    const createBookingMutation =
-        useMutation({
-            mutationFn: async () => {
-                const user =
-                    await getCurrentUser();
+    const isSlotBooked = (
+        slot: string
+    ) => {
+        return bookedTimes.includes(
+            slot
+        );
+    };
 
-                if (!selectedServiceData) {
-                    throw new Error(
-                        "Selected service not found."
-                    );
-                }
-
-                /*
-                 * Create the booking first.
-                 */
-                const createdBooking =
-                    await createBooking({
-                        customerId: user.$id,
-
-                        professionalId:
-                            selectedServiceData.userId,
-
-                        serviceId:
-                            selectedServiceData.$id,
-
-                        propertyId:
-                            selectedProperty,
-
-                        bookingDate:
-                            `${bookingDate}T00:00:00.000Z`,
-
-                        bookingTime,
-
-                        notes:
-                            notes.trim() || null,
-                    });
-
-                /*
-                 * Create booking notification.
-                 *
-                 * The API route uses the Appwrite
-                 * server SDK so that the notification
-                 * can safely be assigned to the
-                 * professional.
-                 */
-                try {
-                    const notificationResponse =
-                        await fetch(
-                            "/api/notifications/booking",
-                            {
-                                method: "POST",
-
-                                headers: {
-                                    "Content-Type":
-                                        "application/json",
-                                },
-
-                                body: JSON.stringify({
-                                    customerId:
-                                        user.$id,
-
-                                    professionalId:
-                                        selectedServiceData.userId,
-
-                                    customerName:
-                                        user.name ||
-                                        "Customer",
-
-                                    serviceName:
-                                        selectedServiceData.serviceName,
-
-                                    bookingDate,
-
-                                    bookingTime,
-
-                                    bookingId:
-                                        createdBooking.$id,
-                                }),
-                            }
-                        );
-
-                    if (
-                        !notificationResponse.ok
-                    ) {
-                        console.error(
-                            "Booking was created, but notifications could not be created."
-                        );
-                    }
-                } catch (
-                    notificationError
-                ) {
-                    /*
-                     * Notification failure should not
-                     * make an already-created booking
-                     * appear as failed.
-                     */
-                    console.error(
-                        "Booking notification request failed:",
-                        notificationError
-                    );
-                }
-
-                return createdBooking;
-            },
-
-            onSuccess: async () => {
-                await Swal.fire({
-                    icon: "success",
-                    title: "Booking Requested",
-                    text: "Your service booking has been submitted successfully.",
-                    confirmButtonText:
-                        "View Bookings",
-                });
-
-                /*
-                 * Clear Zustand booking state after
-                 * successful booking.
-                 */
-                resetBooking();
-
-                router.push(
-                    "/dashboard/bookings"
-                );
-            },
-
-            onError: async (error) => {
-                console.error(
-                    "Booking creation failed:",
-                    error
-                );
-
-                await Swal.fire({
-                    icon: "error",
-                    title: "Booking Failed",
-                    text: "Unable to create the booking. Please try again.",
-                });
-            },
-        });
-
-    /*
-     * Submit booking
-     */
     const handleSubmit = async () => {
         if (!selectedService) {
             await Swal.fire({
@@ -411,12 +412,202 @@ export default function NewBookingPage() {
             return;
         }
 
-        createBookingMutation.mutate();
+        /*
+         * Client-side check before submission.
+         */
+        if (
+            isSlotBooked(
+                bookingTime
+            )
+        ) {
+            setBookingTime("");
+
+            await Swal.fire({
+                icon: "warning",
+                title: "Slot Already Booked",
+                text: "This time slot has already been booked. Please select another time.",
+                confirmButtonColor:
+                    "#0f172a",
+            });
+
+            /*
+             * Refresh slots because another
+             * customer may have booked it.
+             */
+            await loadBookedSlots(
+                bookingDate,
+                selectedServiceData
+            );
+
+            return;
+        }
+
+        try {
+            setSubmitting(true);
+
+            const user =
+                await getCurrentUser();
+
+            if (!selectedServiceData) {
+                throw new Error(
+                    "Selected service not found."
+                );
+            }
+
+            /*
+             * =====================================================
+             * FINAL AVAILABILITY CHECK
+             * =====================================================
+             *
+             * This is the important check.
+             *
+             * Even if the slot looked available when
+             * the page loaded, another customer may have
+             * booked it a moment ago.
+             */
+            const appwriteBookingDate =
+                `${bookingDate}T00:00:00.000Z`;
+
+            const existingBooking =
+                await getBookedSlot(
+                    selectedServiceData.userId,
+                    appwriteBookingDate,
+                    bookingTime
+                );
+
+            if (existingBooking) {
+                setBookingTime("");
+
+                await Swal.fire({
+                    icon: "warning",
+                    title: "Slot Already Booked",
+                    text: "Sorry, this time slot was just booked by another customer. Please choose another slot.",
+                    confirmButtonColor:
+                        "#0f172a",
+                });
+
+                await loadBookedSlots(
+                    bookingDate,
+                    selectedServiceData
+                );
+
+                return;
+            }
+
+            /*
+             * Create the booking.
+             */
+            const createdBooking =
+                await createBooking({
+                    customerId:
+                        user.$id,
+
+                    professionalId:
+                        selectedServiceData.userId,
+
+                    serviceId:
+                        selectedServiceData.$id,
+
+                    propertyId:
+                        selectedProperty,
+
+                    bookingDate:
+                        appwriteBookingDate,
+
+                    bookingTime,
+
+                    notes:
+                        notes.trim() ||
+                        null,
+                });
+
+            /*
+             * Create booking notifications.
+             */
+            try {
+                const notificationResponse =
+                    await fetch(
+                        "/api/notifications/booking",
+                        {
+                            method: "POST",
+
+                            headers: {
+                                "Content-Type":
+                                    "application/json",
+                            },
+
+                            body: JSON.stringify({
+                                customerId:
+                                    user.$id,
+
+                                professionalId:
+                                    selectedServiceData.userId,
+
+                                customerName:
+                                    user.name ||
+                                    "Customer",
+
+                                serviceName:
+                                    selectedServiceData.serviceName,
+
+                                bookingDate,
+
+                                bookingTime,
+
+                                bookingId:
+                                    createdBooking.$id,
+                            }),
+                        }
+                    );
+
+                if (
+                    !notificationResponse.ok
+                ) {
+                    console.error(
+                        "Booking was created, but notifications could not be created."
+                    );
+                }
+            } catch (
+                notificationError
+            ) {
+                /*
+                 * Notification failure should not
+                 * make an already-created booking
+                 * appear as failed.
+                 */
+                console.error(
+                    "Booking notification request failed:",
+                    notificationError
+                );
+            }
+
+            await Swal.fire({
+                icon: "success",
+                title: "Booking Requested",
+                text: "Your service booking has been submitted successfully.",
+                confirmButtonText:
+                    "View Bookings",
+            });
+
+            router.push(
+                "/dashboard/bookings"
+            );
+        } catch (error) {
+            console.error(
+                "Booking creation failed:",
+                error
+            );
+
+            await Swal.fire({
+                icon: "error",
+                title: "Booking Failed",
+                text: "Unable to create the booking. Please try again.",
+            });
+        } finally {
+            setSubmitting(false);
+        }
     };
 
-    /*
-     * Loading screen
-     */
     if (loading) {
         return (
             <div className="min-h-screen flex items-center justify-center bg-slate-50">
@@ -480,7 +671,9 @@ export default function NewBookingPage() {
                                 </option>
 
                                 {services.map(
-                                    (service) => (
+                                    (
+                                        service
+                                    ) => (
                                         <option
                                             key={
                                                 service.$id
@@ -503,12 +696,12 @@ export default function NewBookingPage() {
 
                             {services.length ===
                                 0 && (
-                                    <p className="text-sm text-slate-500 mt-2">
-                                        No professional
-                                        services are
-                                        currently available.
-                                    </p>
-                                )}
+                                <p className="text-sm text-slate-500 mt-2">
+                                    No professional
+                                    services are
+                                    currently available.
+                                </p>
+                            )}
                         </div>
 
                         {/* Service Details */}
@@ -611,7 +804,9 @@ export default function NewBookingPage() {
                                 </option>
 
                                 {properties.map(
-                                    (property) => (
+                                    (
+                                        property
+                                    ) => (
                                         <option
                                             key={
                                                 property.$id
@@ -630,12 +825,12 @@ export default function NewBookingPage() {
 
                             {properties.length ===
                                 0 && (
-                                    <p className="text-sm text-red-500 mt-2">
-                                        Please add a property
-                                        before creating a
-                                        booking.
-                                    </p>
-                                )}
+                                <p className="text-sm text-red-500 mt-2">
+                                    Please add a property
+                                    before creating a
+                                    booking.
+                                </p>
+                            )}
                         </div>
 
                         {/* Date */}
@@ -657,7 +852,7 @@ export default function NewBookingPage() {
                                         )[0]
                                 }
                                 onChange={(e) =>
-                                    setBookingDate(
+                                    handleDateChange(
                                         e.target.value
                                     )
                                 }
@@ -712,27 +907,85 @@ export default function NewBookingPage() {
                                 className="w-full border border-slate-300 px-4 py-3 outline-none focus:border-slate-900 disabled:bg-slate-100"
                             >
                                 <option value="">
-                                    Select time
+                                    {loadingSlots
+                                        ? "Checking availability..."
+                                        : "Select time"}
                                 </option>
 
                                 {selectedServiceData &&
                                     getAvailableSlots(
                                         selectedServiceData
                                     ).map(
-                                        (slot) => (
-                                            <option
-                                                key={
+                                        (slot) => {
+                                            const booked =
+                                                isSlotBooked(
                                                     slot
-                                                }
-                                                value={
-                                                    slot
-                                                }
-                                            >
-                                                {slot}
-                                            </option>
-                                        )
+                                                );
+
+                                            return (
+                                                <option
+                                                    key={
+                                                        slot
+                                                    }
+                                                    value={
+                                                        booked
+                                                            ? ""
+                                                            : slot
+                                                    }
+                                                    disabled={
+                                                        booked
+                                                    }
+                                                >
+                                                    {booked
+                                                        ? `${slot} — Booked`
+                                                        : slot}
+                                                </option>
+                                            );
+                                        }
                                     )}
                             </select>
+
+                            {bookingDate &&
+                                isDateAvailable(
+                                    bookingDate
+                                ) &&
+                                !loadingSlots &&
+                                getAvailableSlots(
+                                    selectedServiceData!
+                                ).some(
+                                    (slot) =>
+                                        isSlotBooked(
+                                            slot
+                                        )
+                                ) && (
+                                    <p className="text-xs text-green-600 mt-2">
+                                        Available slots are
+                                        ready to book.
+                                    </p>
+                                )}
+
+                            {bookingDate &&
+                                isDateAvailable(
+                                    bookingDate
+                                ) &&
+                                !loadingSlots &&
+                                getAvailableSlots(
+                                    selectedServiceData!
+                                ).length > 0 &&
+                                getAvailableSlots(
+                                    selectedServiceData!
+                                ).every(
+                                    (slot) =>
+                                        isSlotBooked(
+                                            slot
+                                        )
+                                ) && (
+                                    <p className="text-sm text-red-600 mt-2">
+                                        All available slots
+                                        for this date are
+                                        already booked.
+                                    </p>
+                                )}
                         </div>
 
                         {/* Notes */}
@@ -842,13 +1095,16 @@ export default function NewBookingPage() {
 
                         <button
                             type="button"
-                            onClick={handleSubmit}
+                            onClick={
+                                handleSubmit
+                            }
                             disabled={
-                                createBookingMutation.isPending
+                                submitting ||
+                                loadingSlots
                             }
                             className="flex-1 bg-slate-900 text-white px-6 py-3 font-semibold hover:bg-slate-800 disabled:opacity-50"
                         >
-                            {createBookingMutation.isPending
+                            {submitting
                                 ? "Submitting..."
                                 : "Confirm Booking"}
                         </button>

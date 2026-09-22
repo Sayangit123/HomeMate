@@ -201,11 +201,34 @@ export default function MarketplacePage() {
       const existingItem = await getCartItemByProduct(user.$id, product.$id);
 
       if (existingItem) {
-        const newQty = (Number(existingItem.quantity) || 1) + 1;
-        return await updateCartItem(existingItem.$id, { quantity: newQty });
+        const currentQty = Number(existingItem.quantity) || 0;
+        const availableStock = Number(product.stock) || 0;
+
+        if (availableStock <= 0) {
+          throw new Error("This product is currently out of stock.");
+        }
+
+        if (currentQty >= availableStock) {
+          throw new Error(
+            `Only ${availableStock} item${availableStock === 1 ? "" : "s"} available in stock.`
+          );
+        }
+
+        const newQty = currentQty + 1;
+
+        return await updateCartItem(existingItem.$id, {
+          quantity: newQty,
+        });
       }
 
       // If new, create document in Appwrite collection
+      // If new, create document in Appwrite collection
+      const availableStock = Number(product.stock) || 0;
+
+      if (availableStock <= 0) {
+        throw new Error("This product is currently out of stock.");
+      }
+
       return await createCartItem({
         customerId: user.$id,
         productId: product.$id,
@@ -382,9 +405,8 @@ export default function MarketplacePage() {
 
       {/* Mobile Sidebar */}
       <aside
-        className={`fixed inset-y-0 left-0 z-50 flex w-72 flex-col bg-[#0b1a2e] text-white transition-transform duration-300 ease-in-out lg:hidden ${
-          mobileMenuOpen ? "translate-x-0 shadow-2xl" : "-translate-x-full"
-        }`}
+        className={`fixed inset-y-0 left-0 z-50 flex w-72 flex-col bg-[#0b1a2e] text-white transition-transform duration-300 ease-in-out lg:hidden ${mobileMenuOpen ? "translate-x-0 shadow-2xl" : "-translate-x-full"
+          }`}
       >
         <div className="flex h-20 items-center justify-between border-b border-white/10 px-6">
           <div className="flex items-center gap-3">
@@ -887,9 +909,8 @@ export default function MarketplacePage() {
               <div className="relative">
                 <span className="text-xl">🛒</span>
                 <span
-                  className={`absolute -top-1.5 -right-2 flex h-4 min-w-4 px-1 items-center justify-center rounded-full text-[9px] font-black text-white shadow-sm transition-all duration-300 ${
-                    cartCount > 0 ? "bg-rose-500 scale-100 animate-pulse" : "bg-slate-400 scale-95"
-                  }`}
+                  className={`absolute -top-1.5 -right-2 flex h-4 min-w-4 px-1 items-center justify-center rounded-full text-[9px] font-black text-white shadow-sm transition-all duration-300 ${cartCount > 0 ? "bg-rose-500 scale-100 animate-pulse" : "bg-slate-400 scale-95"
+                    }`}
                 >
                   {cartCount}
                 </span>
@@ -921,11 +942,10 @@ export default function MarketplacePage() {
             <button
               type="button"
               onClick={() => setViewMode("grid")}
-              className={`flex items-center gap-1.5 rounded-xl px-3 py-1 text-xs font-bold transition ${
-                viewMode === "grid"
-                  ? "bg-blue-600 text-white shadow-sm"
-                  : "text-slate-500 hover:text-slate-800"
-              }`}
+              className={`flex items-center gap-1.5 rounded-xl px-3 py-1 text-xs font-bold transition ${viewMode === "grid"
+                ? "bg-blue-600 text-white shadow-sm"
+                : "text-slate-500 hover:text-slate-800"
+                }`}
             >
               <span>⊞</span>
               <span>Grid</span>
@@ -933,11 +953,10 @@ export default function MarketplacePage() {
             <button
               type="button"
               onClick={() => setViewMode("list")}
-              className={`flex items-center gap-1.5 rounded-xl px-3 py-1 text-xs font-bold transition ${
-                viewMode === "list"
-                  ? "bg-blue-600 text-white shadow-sm"
-                  : "text-slate-500 hover:text-slate-800"
-              }`}
+              className={`flex items-center gap-1.5 rounded-xl px-3 py-1 text-xs font-bold transition ${viewMode === "list"
+                ? "bg-blue-600 text-white shadow-sm"
+                : "text-slate-500 hover:text-slate-800"
+                }`}
             >
               <span>☰</span>
               <span>List</span>
@@ -977,6 +996,7 @@ export default function MarketplacePage() {
           >
             {filteredProducts.map((product) => {
               const isFav = !!favorites[product.$id];
+              const stock = Number(product.stock) || 0;
               const isInStock = product.stock > 0;
               const originalPrice = Math.round(product.price * 1.18);
               const discountPercent = Math.round(
@@ -997,11 +1017,10 @@ export default function MarketplacePage() {
                   >
                     {/* Product Photo Box with In Stock Badge & Wishlist Heart */}
                     <div
-                      className={`relative overflow-hidden rounded-2xl bg-slate-100 border border-slate-100 shrink-0 ${
-                        viewMode === "list"
-                          ? "h-64 lg:h-auto lg:w-80"
-                          : "h-60 w-full"
-                      }`}
+                      className={`relative overflow-hidden rounded-2xl bg-slate-100 border border-slate-100 shrink-0 ${viewMode === "list"
+                        ? "h-64 lg:h-auto lg:w-80"
+                        : "h-60 w-full"
+                        }`}
                     >
                       {product.image ? (
                         <img
@@ -1017,11 +1036,10 @@ export default function MarketplacePage() {
 
                       {/* Stock Pill */}
                       <span
-                        className={`absolute top-3 left-3 inline-flex items-center gap-1 rounded-full px-3 py-1 text-[10px] font-black uppercase shadow-sm backdrop-blur ${
-                          isInStock
-                            ? "bg-emerald-500 text-white"
-                            : "bg-rose-500 text-white"
-                        }`}
+                        className={`absolute top-3 left-3 inline-flex items-center gap-1 rounded-full px-3 py-1 text-[10px] font-black uppercase shadow-sm backdrop-blur ${isInStock
+                          ? "bg-emerald-500 text-white"
+                          : "bg-rose-500 text-white"
+                          }`}
                       >
                         {isInStock ? "IN STOCK" : "OUT OF STOCK"}
                       </span>
@@ -1054,13 +1072,23 @@ export default function MarketplacePage() {
                           <span className="text-[10px] font-black uppercase tracking-wider text-slate-400">
                             {product.category || "HOME TOOLS"}
                           </span>
-                          <span className="flex items-center gap-1.5 text-xs font-bold text-emerald-600">
-                            <span className="h-2 w-2 rounded-full bg-emerald-500" />
-                            <span>In Stock</span>
-                            <span className="text-slate-400 font-medium">
-                              (Only {product.stock} left)
+                          {isInStock ? (
+                            <span className="flex items-center gap-1.5 text-xs font-bold text-emerald-600">
+                              <span className="h-2 w-2 rounded-full bg-emerald-500" />
+                              <span>In Stock</span>
+
+                              {stock <= 5 && (
+                                <span className="text-slate-400 font-medium">
+                                  (Only {stock} left)
+                                </span>
+                              )}
                             </span>
-                          </span>
+                          ) : (
+                            <span className="flex items-center gap-1.5 text-xs font-bold text-rose-600">
+                              <span className="h-2 w-2 rounded-full bg-rose-500" />
+                              <span>Out of Stock</span>
+                            </span>
+                          )}
                         </div>
 
                         {/* Product Title */}

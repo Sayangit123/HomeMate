@@ -268,9 +268,8 @@ export default function MyProductsPage() {
 
       {/* Mobile Sidebar */}
       <aside
-        className={`fixed inset-y-0 left-0 z-50 flex w-72 flex-col bg-[#0b1a2e] text-white transition-transform duration-300 ease-in-out lg:hidden ${
-          mobileMenuOpen ? "translate-x-0 shadow-2xl" : "-translate-x-full"
-        }`}
+        className={`fixed inset-y-0 left-0 z-50 flex w-72 flex-col bg-[#0b1a2e] text-white transition-transform duration-300 ease-in-out lg:hidden ${mobileMenuOpen ? "translate-x-0 shadow-2xl" : "-translate-x-full"
+          }`}
       >
         <div className="flex h-20 items-center justify-between border-b border-white/10 px-6">
           <div className="flex items-center gap-3">
@@ -656,9 +655,8 @@ export default function MyProductsPage() {
                         </div>
                       )}
                       <span
-                        className={`absolute top-3 left-3 rounded-full px-3 py-1 text-[10px] font-bold shadow-sm ${
-                          inStock ? "bg-emerald-500 text-white" : "bg-rose-500 text-white"
-                        }`}
+                        className={`absolute top-3 left-3 rounded-full px-3 py-1 text-[10px] font-bold shadow-sm ${inStock ? "bg-emerald-500 text-white" : "bg-rose-500 text-white"
+                          }`}
                       >
                         {inStock ? "In Stock" : "Out of Stock"}
                       </span>
@@ -729,7 +727,7 @@ export default function MyProductsPage() {
                           Edit
                         </Link>
                         <Link
-                          href={`/dashboard/marketplace/products/${product.$id}`}
+                          href={`/dashboard/marketplace/${product.$id}`}
                           className="flex-1 rounded-xl border border-blue-200 bg-blue-50 py-2 text-center text-xs font-bold text-blue-600 hover:bg-blue-600 hover:text-white transition shadow-sm"
                         >
                           View

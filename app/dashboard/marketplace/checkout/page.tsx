@@ -9,7 +9,9 @@ import {
     useQueryClient,
 } from "@tanstack/react-query";
 import Swal from "sweetalert2";
+import { Databases } from "appwrite";
 
+import client from "@/lib/appwrite/client";
 import { getCurrentUser } from "@/lib/appwrite/account";
 
 import {
@@ -26,6 +28,15 @@ import { createPayment } from "@/lib/appwrite/payments";
 import {
     useCheckoutStore,
 } from "@/lib/stores/checkout-store";
+
+const databases = new Databases(client);
+
+const DATABASE_ID =
+    process.env.NEXT_PUBLIC_APPWRITE_DATABASE_ID!;
+
+const PRODUCTS_TABLE_ID =
+    process.env.NEXT_PUBLIC_APPWRITE_PRODUCTS_TABLE_ID ||
+    "products";
 
 interface Product {
     $id: string;
@@ -261,6 +272,49 @@ export default function CheckoutPage() {
                 price: item.product.price,
                 quantity: item.quantity,
             });
+        }
+
+        /*
+         * ---------------- DECREASE PRODUCT STOCK ----------------
+         *
+         * Fetch the latest product document again before updating
+         * stock so checkout does not rely only on the older cart data.
+         */
+        for (const item of items) {
+            const latestProduct =
+                (await getProductById(
+                    item.product.$id
+                )) as unknown as Product;
+
+            const currentStock =
+                Number(latestProduct.stock) || 0;
+
+            const purchasedQuantity =
+                Number(item.quantity) || 0;
+
+            if (purchasedQuantity <= 0) {
+                throw new Error(
+                    `INVALID_QUANTITY:${item.product.productName}`
+                );
+            }
+
+            if (currentStock < purchasedQuantity) {
+                throw new Error(
+                    `INSUFFICIENT_STOCK:${item.product.productName}`
+                );
+            }
+
+            const remainingStock =
+                currentStock - purchasedQuantity;
+
+            await databases.updateDocument(
+                DATABASE_ID,
+                PRODUCTS_TABLE_ID,
+                item.product.$id,
+                {
+                    stock: remainingStock,
+                }
+            );
         }
 
         /*
@@ -548,6 +602,10 @@ export default function CheckoutPage() {
                 queryKey: ["marketplace-cart"],
             });
 
+            await queryClient.invalidateQueries({
+                queryKey: ["marketplace-products"],
+            });
+
             resetCheckout();
 
             await Swal.fire({
@@ -661,6 +719,25 @@ export default function CheckoutPage() {
                     icon: "error",
                     title: "Insufficient Stock",
                     text: `${productName} does not have enough stock for your requested quantity.`,
+                    confirmButtonColor: "#0f172a",
+                });
+                return;
+            }
+
+            if (
+                message.startsWith(
+                    "INVALID_QUANTITY:"
+                )
+            ) {
+                const productName = message.replace(
+                    "INVALID_QUANTITY:",
+                    ""
+                );
+
+                await Swal.fire({
+                    icon: "error",
+                    title: "Invalid Quantity",
+                    text: `The quantity for ${productName} is invalid.`,
                     confirmButtonColor: "#0f172a",
                 });
                 return;
