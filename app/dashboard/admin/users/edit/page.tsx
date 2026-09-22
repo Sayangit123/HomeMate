@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Swal from "sweetalert2";
 import {
@@ -40,7 +40,7 @@ interface Member {
     $createdAt?: string;
 }
 
-export default function EditUserPage() {
+function EditUserPageContent() {
     const router = useRouter();
     const searchParams = useSearchParams();
 
@@ -735,5 +735,24 @@ export default function EditUserPage() {
             </div>
 
         </main>
+    );
+}
+
+export default function EditUserPage() {
+    return (
+        <Suspense
+            fallback={
+                <main className="flex min-h-screen items-center justify-center bg-slate-50">
+                    <div className="text-center">
+                        <div className="mx-auto h-10 w-10 animate-spin border-2 border-slate-200 border-t-slate-950" />
+                        <p className="mt-4 text-[10px] font-bold uppercase tracking-[0.25em] text-slate-400">
+                            Loading User
+                        </p>
+                    </div>
+                </main>
+            }
+        >
+            <EditUserPageContent />
+        </Suspense>
     );
 }

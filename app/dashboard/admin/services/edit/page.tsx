@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { Suspense, useMemo } from "react";
 import {
     useMutation,
     useQuery,
@@ -123,7 +123,7 @@ const serviceToForm = (
         ),
 });
 
-export default function EditServicePage() {
+function EditServicePageContent() {
     const router = useRouter();
 
     const searchParams =
@@ -824,5 +824,24 @@ export default function EditServicePage() {
             </div>
 
         </main>
+    );
+}
+
+export default function EditServicePage() {
+    return (
+        <Suspense
+            fallback={
+                <main className="flex min-h-screen items-center justify-center bg-slate-100">
+                    <div className="text-center">
+                        <div className="mx-auto mb-4 h-10 w-10 animate-spin rounded-full border-4 border-slate-200 border-t-slate-900" />
+                        <p className="text-sm text-slate-500">
+                            Loading service...
+                        </p>
+                    </div>
+                </main>
+            }
+        >
+            <EditServicePageContent />
+        </Suspense>
     );
 }
